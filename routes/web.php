@@ -3,7 +3,23 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Web\ProductsController;
 use App\Http\Controllers\Web\UsersController;
-use App\Http\Controllers\TaskController;
+use App\Http\Controllers\GradeController;
+use App\Http\Controllers\QuestionController;
+use App\Http\Controllers\ExamController;
+use Illuminate\Support\Facades\DB;
+use App\Http\Controllers\Web\RolesController;
+use App\Http\Controllers\Web\PermissionsController;
+use App\Http\Controllers\Web\CreditsController;
+use App\Http\Controllers\Web\EmployeeCustomerController;
+use App\Http\Controllers\Web\EmployeeController;
+use App\Http\Controllers\GitHubAuthController;
+use App\Http\Controllers\Web\RoleController;
+use App\Http\Controllers\ManagerController;
+use App\Http\Controllers\SupportController;
+use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\GoogleAuthController;
+use App\Http\Controllers\LinkedInAuthController;
+use App\Http\Controllers\TwitterAuthController;
 
 Route::get('register', [UsersController::class, 'register'])->name('register');
 Route::post('register', [UsersController::class, 'doRegister'])->name('do_register');
@@ -17,219 +33,246 @@ Route::post('users/save/{user}', [UsersController::class, 'save'])->name('users_
 Route::get('users/delete/{user}', [UsersController::class, 'delete'])->name('users_delete');
 Route::get('users/edit_password/{user?}', [UsersController::class, 'editPassword'])->name('edit_password');
 Route::post('users/save_password/{user}', [UsersController::class, 'savePassword'])->name('save_password');
-Route::get('/verify/{token}', [App\Http\Controllers\Web\UsersController::class, 'verify'])
-    ->name('verify');
-Route::get('/login/google', [App\Http\Controllers\Web\UsersController::class, 'redirectToGoogle'])
-    ->name('login_with_google');
 
-Route::get('/auth/google/callback', [App\Http\Controllers\Web\UsersController::class, 'handleGoogleCallback']);
+// Password reset routes
+Route::get('forgot-password', [UsersController::class, 'forgotPassword'])->name('password.request');
+Route::post('forgot-password', [UsersController::class, 'processForgotPassword'])->name('password.email');
+Route::post('process-forgot-password', [UsersController::class, 'processForgotPassword'])->name('process_forgot_password');
+Route::get('reset-password-token/{token}', [UsersController::class, 'resetPasswordWithToken'])->name('reset_password_token');
+
+// Temporary password reset (Basic method)
+Route::get('change-temp-password', [UsersController::class, 'changeTempPassword'])->name('change_temp_password');
+Route::post('update-temp-password', [UsersController::class, 'updateTempPassword'])->name('update_temp_password');
+
+// Professional password reset
+Route::get('reset-password/{token}', [UsersController::class, 'resetPasswordWithToken'])->name('password.reset');
+Route::post('reset-password/{token}', [UsersController::class, 'processResetPasswordWithToken'])->name('password.update');
+
+// Legacy password reset routes (with security questions)
+Route::get('reset-password/{user}', [UsersController::class, 'resetPassword'])->name('reset_password');
+Route::post('reset-password/{user}', [UsersController::class, 'processResetPassword'])->name('process_reset_password');
 
 Route::get('products', [ProductsController::class, 'list'])->name('products_list');
+Route::get('products/show/{product}', [ProductsController::class, 'showProduct'])->name('products_show');
 Route::get('products/edit/{product?}', [ProductsController::class, 'edit'])->name('products_edit');
 Route::post('products/save/{product?}', [ProductsController::class, 'save'])->name('products_save');
 Route::get('products/delete/{product}', [ProductsController::class, 'delete'])->name('products_delete');
+Route::post('products/purchase/{product}', [ProductsController::class, 'purchase'])->name('products_purchase');
+Route::get('purchase-history', [ProductsController::class, 'purchaseHistory'])->name('purchase_history');
 
 Route::get('/', function () {
     return view('welcome');
+})->name('home');
+
+Route::get('/test-connection', function () {
+    return 'Connection test successful!';
 });
 
-Route::get('/multable', function (Request $request) {
-    $j = $request->number??5;
-    $msg = $request->msg;
-    return view('multable', compact("j", "msg"));
-});
-
-Route::get('/even', function () {
-    return view('even');
-});
-
-Route::get('/prime', function () {
-    return view('prime');
-});
-
-Route::get('/test', function () {
-    return view('test');
-});
-
-// Route::get('/sqli', function (Request $request) {
-//     $table = $request->query('table');
-//     DB::unprepared("DROP TABLE $table");
-//     return redirect('/');
-// });
-
-
-// Route::get('/collect', function (Request $request) {
-//     $name = $request->query('name');
-//     $credit = $request->query('credit');
-
-//     return response('data collected', 200)
-//         ->header('Access-Control-Allow-Origin', '*') 
-//         ->header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-//         ->header('Access-Control-Allow-Headers', 'Content-Type,X-Requested-With');
-// });
-
-Route::get('/email/resend', [App\Http\Controllers\Web\UsersController::class, 'resendVerification'])
-    ->name('resend.verification');
-
-Route::get('/debug/check-email', function(Request $request) {
-    $email = $request->query('email');
-    $user = \App\Models\User::where('email', $email)->first();
-    
-    if ($user) {
-        return response()->json([
-            'found' => true,
-            'user_id' => $user->id,
-            'name' => $user->name,
-            'email' => $user->email
-        ]);
-    } else {
-        return response()->json([
-            'found' => false,
-            'email_checked' => $email
-        ]);
-    }
-});
-
-Route::get('/test-queue', function() {
-    dispatch(function() {
-        \Log::info('Queue is working!');
-    });
-    
-    return 'Job dispatched!';
-});
-
-Route::get('/test-email', function () {
-    $name = 'Test User';
-    $email = 'yassin.shaher2005@gmail.com';
-    
-    \Log::info('Sending test email to: ' . $email);
-    
+Route::get('/test-db', function () {
     try {
-        \Mail::raw('This is a test email from Laravel', function ($message) use ($email, $name) {
-            $message->to($email, $name)
-                    ->subject('Test Email');
-        });
-        
-        \Log::info('Test email sent successfully');
-        return 'Email sent successfully! Check your inbox.';
+        DB::connection()->getPdo();
+        return 'Database connection successful! Database: ' . DB::connection()->getDatabaseName();
     } catch (\Exception $e) {
-        \Log::error('Failed to send test email: ' . $e->getMessage());
-        return 'Failed to send email: ' . $e->getMessage();
+        return 'Database connection failed: ' . $e->getMessage();
     }
 });
 
-Route::get('/debug-google', function() {
-    return [
-        'client_id' => config('services.google.client_id'),
-        'client_secret' => '**hidden**',
-        'redirect' => config('services.google.redirect')
+Route::get('/test-exam', function () {
+    $questions = [
+        (object)[
+            'id' => 1,
+            'question' => 'What is the correct way to declare a variable in PHP?',
+            'option_a' => '$variable = value;',
+            'option_b' => 'variable = value;',
+            'option_c' => 'var variable = value;',
+            'option_d' => 'variable := value;',
+            'correct_answer' => 'A'
+        ],
+        (object)[
+            'id' => 2,
+            'question' => 'Which SQL statement is used to retrieve data from a database?',
+            'option_a' => 'GET',
+            'option_b' => 'SELECT',
+            'option_c' => 'EXTRACT',
+            'option_d' => 'OPEN',
+            'correct_answer' => 'B'
+        ],
+        (object)[
+            'id' => 3,
+            'question' => 'Which tag is used to define an HTML hyperlink?',
+            'option_a' => '<link>',
+            'option_b' => '<a>',
+            'option_c' => '<href>',
+            'option_d' => '<hyperlink>',
+            'correct_answer' => 'B'
+        ]
     ];
+    
+    return view('users.exam.start', compact('questions'));
 });
 
-Route::get('/products/{product}/toggle-favorite', [ProductsController::class, 'toggleFavorite'])
-    ->name('products_toggle_favorite')
-    ->middleware('auth');
-
-
-Route::get('/cryptography', function (Request $request) {
-
-    $data = $request->data??"Welcome to Cryptography";
-    $action = $request->action??"Encrypt";
-    $result = $request->result??"";
-    $status = "Failed";
-    $size = 0;
-
-    if($request->action=="Encrypt") {
-
-        $temp = openssl_encrypt($request->data, 'aes-128-ecb', 'thisisasecretkey', OPENSSL_RAW_DATA, '');
-        if($temp) {
-            $status = 'Encrypted Successfully';
-            $result = base64_encode($temp);
-        }
-    }
-    else if($request->action=="Decrypt") {
-
-        $temp = base64_decode($request->data);
-
-        $result = openssl_decrypt($temp, 'aes-128-ecb',  'thisisasecretkey', OPENSSL_RAW_DATA, '');
-
-        if($result) $status = 'Decrypted Successfully';
-    }
-    else if($request->action=="Hash") {
-
-        $temp = hash('sha256', $request->data);
-
-        $result = base64_encode($temp);
-
-        $status = 'Hashed Successfully';
-    }
-    else if($request->action=="Sign") {
-
-        $path = storage_path('app/private/useremail@domain.com.pfx');
-        $password = '12345678';
-        $certificates = [];
-
-        $pfx = file_get_contents($path);
-        openssl_pkcs12_read($pfx, $certificates, $password);
-        $privateKey = $certificates['pkey'];
-
-        $signature = '';
-        if(openssl_sign($request->data, $signature, $privateKey, 'sha256')) {
-            $result = base64_encode($signature);
-            $status = 'Signed Successfully';
-        }
-    }
-    else if($request->action=="Verify") {
-
-        $signature = base64_decode($request->result);
-
-        $path = storage_path('app/public/useremail@domain.com.crt');
-        $publicKey = file_get_contents($path);
-
-        if(openssl_verify($request->data, $signature, $publicKey, 'sha256')) {
-            $status = 'Verified Successfully';
-        }
-    }
-    else if($request->action=="KeySend") {
-
-        $path = storage_path('app/public/useremail@domain.com.crt');
-        $publicKey = file_get_contents($path);
-        $temp = '';
-
-        if(openssl_public_encrypt($request->data, $temp, $publicKey)) {
-            $result = base64_encode($temp);
-            $status = 'Key is Encrypted Successfully';
-        }
-    }
-    else if($request->action=="KeyRecive") {
-
-        $path = storage_path('app/private/useremail@domain.com.pfx');
-        $password = '12345678';
-        $certificates = [];
-
-        $pfx = file_get_contents($path);
-        openssl_pkcs12_read($pfx, $certificates, $password);
-        $privateKey = $certificates['pkey'];
-
-        $encryptedKey = base64_decode($request->data);
-        $result = '';
-
-        if(openssl_private_decrypt($encryptedKey, $result, $privateKey)) {
-
-            $status = 'Key is Decrypted Successfully';
-        }
-    }
-
-
-
-
-
-    return view('cryptography', compact('data', 'result', 'action', 'status'));
-})->name('cryptography');
-
-Route::middleware('auth')->group(function () {
-    Route::get('/tasks', [TaskController::class, 'index'])->name('tasks.index');
-    Route::post('/tasks', [TaskController::class, 'store'])->name('tasks.store');
-    Route::post('/tasks/{task}/complete', [TaskController::class, 'complete'])->name('tasks.complete');
+Route::get('/test-result', function () {
+    return view('users.exam.result', [
+        'score' => 2,
+        'total' => 3
+    ]);
 });
 
+// Add these routes for roles and permissions management
+Route::group(['middleware' => ['auth', 'permission:admin_users']], function () {
+    Route::resource('roles', RolesController::class);
+});
+
+// GitHub Authentication Routes
+Route::get('/auth/github', [GitHubAuthController::class, 'redirect'])->name('auth.github');
+Route::get('/auth/github/callback', [GitHubAuthController::class, 'callback'])->name('auth.github.callback');
+
+// User Management Routes
+Route::prefix('users')->name('users_')->group(function () {
+    Route::get('/create-employee', [UsersController::class, 'createEmployee'])->name('create_employee');
+    Route::post('/create-employee', [UsersController::class, 'storeEmployee'])->name('create_employee_post');
+    Route::get('/toggle-block/{user}', [UsersController::class, 'toggleBlockStatus'])->name('toggle_block');
+    Route::get('/ensure-roles', [UsersController::class, 'ensureUserRoles'])->name('ensure_roles');
+});
+
+// Credit Management Routes
+Route::prefix('credits')->name('credits.')->group(function () {
+    Route::get('/', [CreditsController::class, 'index'])->name('index');
+    Route::get('/admin', [CreditsController::class, 'adminIndex'])->name('admin');
+    Route::get('/add/{customer}', [CreditsController::class, 'addForm'])->name('add_form');
+    Route::post('/add/{customer}', [CreditsController::class, 'addCredit'])->name('add');
+    Route::get('/transactions', [CreditsController::class, 'index'])->name('transactions');
+    Route::get('/self-add', [CreditsController::class, 'selfAddForm'])->name('self_add');
+    Route::post('/self-add', [CreditsController::class, 'selfAddStore'])->name('self_add_store');
+});
+
+// Employee Management Routes
+Route::prefix('employee')->name('employee.')->group(function () {
+    Route::get('/dashboard', [EmployeeController::class, 'dashboard'])->name('dashboard');
+    Route::get('/customers', [EmployeeController::class, 'listCustomers'])->name('customers');
+    Route::get('/manage-customers', [EmployeeCustomerController::class, 'index'])->name('manage_customers');
+});
+
+// Employee-Customer Management Routes
+Route::prefix('employee-customers')->name('employee_customers.')->group(function () {
+    Route::get('/', [EmployeeCustomerController::class, 'index'])->name('index');
+    Route::get('/create', [EmployeeCustomerController::class, 'create'])->name('create');
+    Route::post('/', [EmployeeCustomerController::class, 'store'])->name('store');
+    Route::delete('/{customer}', [EmployeeCustomerController::class, 'destroy'])->name('destroy');
+});
+
+// Role Management Routes
+Route::middleware(['auth', 'role:admin'])->group(function () {
+    Route::resource('roles', RoleController::class);
+});
+
+// Permission Management Routes
+Route::prefix('permissions')->name('permissions.')->group(function () {
+    Route::get('/', [PermissionsController::class, 'index'])->name('index');
+    Route::get('/create', [PermissionsController::class, 'create'])->name('create');
+    Route::post('/', [PermissionsController::class, 'store'])->name('store');
+    Route::get('/{permission}/edit', [PermissionsController::class, 'edit'])->name('edit');
+    Route::put('/{permission}', [PermissionsController::class, 'update'])->name('update');
+    Route::delete('/{permission}', [PermissionsController::class, 'destroy'])->name('destroy');
+});
+
+// Temporary test route for cryptography
+// Route::get('/cryptography', function () {
+//     return 'Cryptography route is working!';
+// });
+
+// Customer Favorite Products Routes
+Route::middleware(['auth'])->group(function () {
+    Route::match(['post', 'delete'], '/products/{product}/favorite', [ProductsController::class, 'favorite'])->name('products.favorite');
+    Route::get('/favorites', [ProductsController::class, 'favoritesList'])->name('products.favorites.list');
+    Route::put('/profile', [ProfileController::class, 'update'])->name('profile.update');
+});
+
+// Email Verification Routes
+Route::get('/email/verify/{id}/{hash}', [UsersController::class, 'verifyEmail'])
+    ->middleware(['signed'])
+    ->name('verification.verify');
+Route::get('/resend-verification', [UsersController::class, 'resendVerification'])
+    ->middleware(['auth', 'throttle:6,1'])
+    ->name('verification.resend');
+
+// Manager Routes
+Route::middleware(['auth', \App\Http\Middleware\CheckManagerPermissions::class.':orders'])->group(function () {
+    Route::get('/manager/orders', [\App\Http\Controllers\Manager\OrderController::class, 'index'])->name('manager.orders.index');
+    Route::get('/manager/orders/create', [\App\Http\Controllers\Manager\OrderController::class, 'create'])->name('manager.orders.create');
+    Route::post('/manager/orders', [\App\Http\Controllers\Manager\OrderController::class, 'store'])->name('manager.orders.store');
+    Route::get('/manager/orders/{order}', [\App\Http\Controllers\Manager\OrderController::class, 'show'])->name('manager.orders.show');
+    Route::put('/manager/orders/{order}', [\App\Http\Controllers\Manager\OrderController::class, 'update'])->name('manager.orders.update');
+    Route::delete('/manager/orders/{order}', [\App\Http\Controllers\Manager\OrderController::class, 'destroy'])->name('manager.orders.destroy');
+});
+
+Route::middleware(['auth', \App\Http\Middleware\CheckManagerPermissions::class.':inventory'])->group(function () {
+    Route::get('/manager/inventory', [\App\Http\Controllers\Manager\InventoryController::class, 'index'])->name('manager.inventory.index');
+    Route::get('/manager/inventory/create', [\App\Http\Controllers\Manager\InventoryController::class, 'create'])->name('manager.inventory.create');
+    Route::post('/manager/inventory', [\App\Http\Controllers\Manager\InventoryController::class, 'store'])->name('manager.inventory.store');
+    Route::get('/manager/inventory/{item}/edit', [\App\Http\Controllers\Manager\InventoryController::class, 'edit'])->name('manager.inventory.edit');
+    Route::put('/manager/inventory/{item}', [\App\Http\Controllers\Manager\InventoryController::class, 'update'])->name('manager.inventory.update');
+    Route::delete('/manager/inventory/{item}', [\App\Http\Controllers\Manager\InventoryController::class, 'destroy'])->name('manager.inventory.destroy');
+});
+
+Route::middleware(['auth', \App\Http\Middleware\CheckManagerPermissions::class.':reports'])->group(function () {
+    Route::get('/manager/reports', [\App\Http\Controllers\Manager\ReportController::class, 'index'])->name('manager.reports.index');
+    Route::get('/manager/reports/customers', [\App\Http\Controllers\Manager\ReportController::class, 'customers'])->name('manager.reports.customers');
+    Route::get('/manager/reports/export', [\App\Http\Controllers\Manager\ReportController::class, 'export'])->name('manager.reports.export');
+});
+
+// Manager Reports Routes
+Route::middleware(['auth', \App\Http\Middleware\CheckManagerPermissions::class.':reports'])->prefix('manager/reports')->name('manager.reports.')->group(function () {
+    Route::get('/sales', [App\Http\Controllers\Manager\ReportController::class, 'sales'])->name('sales');
+    Route::get('/sales/export/{format}', [App\Http\Controllers\Manager\ReportController::class, 'exportSales'])->name('sales.export');
+    Route::get('/inventory', [App\Http\Controllers\Manager\ReportController::class, 'inventory'])->name('inventory');
+    Route::get('/customers', [App\Http\Controllers\Manager\ReportController::class, 'customers'])->name('customers');
+});
+
+// Support Routes
+Route::middleware(['auth'])->prefix('support')->name('support.')->group(function () {
+    // Ticket Routes
+    Route::get('/tickets', [SupportController::class, 'tickets'])->name('tickets.index');
+    Route::get('/tickets/create', [SupportController::class, 'createTicket'])->name('tickets.create');
+    Route::post('/tickets', [SupportController::class, 'storeTicket'])->name('tickets.store');
+    Route::get('/tickets/{ticket}', [SupportController::class, 'showTicket'])->name('tickets.show');
+    Route::post('/tickets/{ticket}/respond', [SupportController::class, 'respondTicket'])->name('tickets.respond');
+    
+    // Order Routes
+    Route::get('/orders', [SupportController::class, 'orders'])->name('orders.index');
+    Route::get('/orders/create', [SupportController::class, 'createOrder'])->name('orders.create');
+    Route::post('/orders', [SupportController::class, 'storeOrder'])->name('orders.store');
+    Route::get('/orders/{order}', [SupportController::class, 'showOrder'])->name('orders.show');
+});
+
+Route::get('/auth/google', [GoogleAuthController::class, 'redirect'])->name('auth.google');
+Route::get('/auth/google/callback', [GoogleAuthController::class, 'callback'])->name('auth.google.callback');
+
+Route::get('/auth/linkedin', [LinkedInAuthController::class, 'redirect'])->name('auth.linkedin');
+Route::get('/auth/linkedin/callback', [LinkedInAuthController::class, 'callback'])->name('auth.linkedin.callback');
+
+Route::get('/auth/twitter', [TwitterAuthController::class, 'redirect'])->name('auth.twitter');
+Route::get('/auth/twitter/callback', [TwitterAuthController::class, 'callback'])->name('auth.twitter.callback');
+
+// Standard Laravel Authentication Routes (including password reset)
+// These were added previously but are causing issues with the controller.
+// We will rely on the existing UsersController methods instead.
+// Route::get('email/verify', function () {
+//     return view('auth.verify-email');
+// })->middleware('auth')->name('verification.notice');
+//
+// Route::get('forgot-password', \Illuminate\Auth\Controllers\PasswordController::class)
+//     ->middleware('guest')
+//     ->name('password.request');
+//
+// Route::post('forgot-password', \Illuminate\Auth\Controllers\PasswordController::class)
+//     ->middleware('guest')
+//     ->name('password.email');
+//
+// Route::get('reset-password/{token}', \Illuminate\Auth\Controllers\PasswordController::class)
+//     ->middleware('guest')
+//     ->name('password.reset');
+//
+// Route::post('reset-password', \Illuminate\Auth\Controllers\PasswordController::class)
+//     ->middleware('guest')
+//     ->name('password.update');

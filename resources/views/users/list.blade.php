@@ -1,11 +1,44 @@
 @extends('layouts.master')
 @section('title', 'Users')
 @section('content')
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const resetButton = document.querySelector('button[type="reset"]');
+    if (resetButton) {
+        resetButton.addEventListener('click', function(e) {
+            e.preventDefault();
+            window.location.href = window.location.pathname;
+        });
+    }
+});
+</script>
 <div class="row mt-2">
-    <div class="col col-10">
-        <h1>Users</h1>
+    <div class="col col-8">
+        @if(auth()->check() && auth()->user()->isEmployee() && !auth()->user()->isAdmin())
+            <h1>Customers</h1>
+        @else
+            <h1>Users</h1>
+        @endif
     </div>
+    @if(auth()->check() && auth()->user()->isAdmin())
+    <div class="col col-4">
+        <a href="{{ route('users_create_employee') }}" class="btn btn-success">Create Employee Account</a>
+    </div>
+    @endif
 </div>
+
+@if(session('success'))
+    <div class="alert alert-success">
+        {{ session('success') }}
+    </div>
+@endif
+
+@if(session('error'))
+    <div class="alert alert-danger">
+        {{ session('error') }}
+    </div>
+@endif
+
 <form>
     <div class="row">
         <div class="col col-sm-2">
@@ -19,6 +52,15 @@
         </div>
     </div>
 </form>
+
+@if(!empty(request()->keywords))
+   <div class="card mt-2">
+    <div class="card-body">
+       view search results: <span>{{request()->keywords}}</span>
+    </div>
+  </div>
+@endif
+
 
 <div class="card mt-2">
   <div class="card-body">
@@ -39,16 +81,32 @@
         <td scope="col">{{$user->email}}</td>
         <td scope="col">
           @foreach($user->roles as $role)
-            <span class="badge bg-primary">{{$role->name}}</span>
+            @if($role->name == 'admin')
+              <span class="badge bg-danger">Admin</span>
+            @elseif($role->name == 'employee')
+              <span class="badge bg-warning text-dark">Employee</span>
+            @elseif($role->name == 'customer')
+              <span class="badge bg-success">Customer</span>
+            @else
+              <span class="badge bg-info">{{ $role->name }}</span>
+            @endif
           @endforeach
         </td>
         <td scope="col">
+          @if($user->hasRole('customer'))
+            <a class="btn btn-success btn-sm" href="{{ route('credits.add_form', $user->id) }}">Add Credit</a>
+          @endif
           @can('edit_users')
           <a class="btn btn-primary" href='{{route('users_edit', [$user->id])}}'>Edit</a>
           @endcan
           @can('admin_users')
           <a class="btn btn-primary" href='{{route('edit_password', [$user->id])}}'>Change Password</a>
           @endcan
+          @if(auth()->user()->isAdmin() || auth()->user()->isEmployee())
+          <a href="{{ route('users_toggle_block', $user->id) }}" class="btn {{ $user->isBlocked() ? 'btn-warning' : 'btn-danger' }} btn-sm">
+            {{ $user->isBlocked() ? 'Unblock' : 'Block' }}
+          </a>
+          @endif
           @can('delete_users')
           <a class="btn btn-danger" href='{{route('users_delete', [$user->id])}}'>Delete</a>
           @endcan

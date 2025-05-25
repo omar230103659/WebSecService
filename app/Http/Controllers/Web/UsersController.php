@@ -7,15 +7,14 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Spatie\Permission\Models\Role;
 use Spatie\Permission\Models\Permission;
-use Illuminate\Support\Facades\Crypt;
-use Illuminate\Support\Facades\Mail;
-use Laravel\Socialite\Facades\Socialite;
 use DB;
 use Artisan;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
+use App\Models\PasswordReset;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Hash;
 
-
-use App\Mail\VerificationEmail;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 
@@ -24,10 +23,23 @@ class UsersController extends Controller {
 	use ValidatesRequests;
 
     public function list(Request $request) {
-        if(!auth()->user()->hasPermissionTo('show_users'))abort(401);
+        // Get current user
+        $user = auth()->user();
+        
+        // If user is not logged in or not an admin, redirect them
+        if (!$user || !$user->isAdmin()) {
+            return redirect()->route('home')
+                ->with('error', 'You do not have permission to access the users list');
+        }
+        
+        // Create the base query
         $query = User::select('*');
-        $query->when($request->keywords, 
-        fn($q)=> $q->where("name", "like", "%$request->keywords%"));
+        
+        // Apply keyword search if provided
+        if ($request->keywords) {
+            $query->where("name", "like", "%$request->keywords%");
+        }
+        
         $users = $query->get();
         return view('users.list', compact('users'));
     }
@@ -37,38 +49,36 @@ class UsersController extends Controller {
     }
 
     public function doRegister(Request $request) {
+    	$this->validate($request, [
+        'name' => ['required', 'string', 'max:255'],
+        'email' => ['required', 'string', 'email', 'max:255', 'unique:users'],
+        'password' => ['required', 'string', 'min:8', 'confirmed'],
+        'security_question' => ['required', 'string'],
+        'security_answer' => ['required', 'string'],
+    ]);
 
-    	try {
-    		$this->validate($request, [
-	        'name' => ['required', 'string'],
-	        'email' => ['required', 'email', 'unique:users'],
-	        'password' => ['required'],
-	    	]);
-    	}
-    	catch(\Exception $e) {
-    		return redirect()->back()->withInput($request->only('name', 'email'))->withErrors($e->getMessage());
-    	}
+    $user = User::create([
+        'name' => $request->name,
+        'email' => $request->email,
+        'password' => Hash::make($request->password),
+        'security_question' => $request->security_question,
+        'security_answer' => $request->security_answer,
+    ]);
+    
+    // Assign Customer role to newly registered users
+    $customerRole = \Spatie\Permission\Models\Role::firstOrCreate(['name' => 'customer', 'guard_name' => 'web']);
+    $user->assignRole($customerRole);
+    
+    \App\Models\UserCredit::create([
+        'user_id' => $user->id,
+        'amount' => 0.00
+    ]);
 
-    	
-    	$user =  new User();
-	    $user->name = $request->name;
-	    $user->email = $request->email;
-	    $user->password = bcrypt($request->password); //Secure
-	    $user->save();
+    // Send verification email
+    $user->sendEmailVerificationNotification();
 
-        $title = "Verification Link";
-        $token = Crypt::encryptString(json_encode(['id' => $user->id, 'email' => $user->email]));
-        $link = route("verify", ['token' => $token]);
-        try {
-            \Log::info('Attempting to send verification email to: ' . $user->email);
-            Mail::to($user->email)->send(new VerificationEmail($link, $user->name));
-            \Log::info('Successfully sent verification email');
-        } catch (\Exception $e) {
-            \Log::error('Failed to send verification email: ' . $e->getMessage());
-            return redirect('/')->with('message', 'Registration complete. If you did not receive an email, please check your spam folder or contact support.');
-        }
-        return redirect('/');
-
+    return redirect()->route('login')
+        ->with('success', 'Registration successful! Please check your email to verify your account.');
     }
 
     public function login(Request $request) {
@@ -76,19 +86,27 @@ class UsersController extends Controller {
     }
 
     public function doLogin(Request $request) {
-    	
     	if(!Auth::attempt(['email' => $request->email, 'password' => $request->password]))
-            return redirect()->back()->withInput($request->only('email'))->withErrors('Invalid login information.');
+            return redirect()->back()->withInput($request->input())->withErrors('Invalid login information.');
 
         $user = User::where('email', $request->email)->first();
-        Auth::setUser($user);
-
-        if(!$user->email_verified_at) {
+        
+        if ($user->isBlocked()) {
             Auth::logout();
-            $encodedEmail = rawurlencode($request->email);
-            return redirect()->back()
-                ->withInput(['email' => $request->email])
-                ->withErrors('Your email is not verified. <a href="' . route('resend.verification', ['email' => $encodedEmail]) . '">Click here to resend verification email</a>');
+            return redirect()->back()->withInput($request->only('email'))
+                ->withErrors('Your account has been blocked.');
+        }
+
+        if (!$user->hasVerifiedEmail()) {
+            Auth::logout();
+            return redirect()->back()->withInput($request->only('email'))
+                ->withErrors('Please verify your email address before logging in.');
+        }
+        
+        Auth::setUser($user);
+        
+        if ($user->is_using_temp_password) {
+            return redirect()->route('change_temp_password');
         }
 
         return redirect('/');
@@ -102,30 +120,48 @@ class UsersController extends Controller {
     }
 
     public function profile(Request $request, User $user = null) {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
+        }
 
         $user = $user??auth()->user();
-        if(auth()->id()!=$user->id) {
-            if(!auth()->user()->hasPermissionTo('show_users')) abort(401);
-        }
+        
+        $permissions = $user->getAllPermissions();
+        
+        // Get credit information and other customer details if this is a customer
+        $creditAmount = $user->isCustomer() ? $user->getCreditAmount() : 0;
+        $creditHistory = $user->isCustomer() ? \App\Models\CreditTransaction::where('user_id', $user->id)->take(5)->get() : null;
+        $purchaseHistory = $user->isCustomer() ? \App\Models\Purchase::where('user_id', $user->id)->take(5)->get() : null;
 
-        $permissions = [];
-        foreach($user->permissions as $permission) {
-            $permissions[] = $permission;
-        }
-        foreach($user->roles as $role) {
-            foreach($role->permissions as $permission) {
-                $permissions[] = $permission;
-            }
-        }
-
-        return view('users.profile', compact('user', 'permissions'));
+        return view('users.profile', compact('user', 'permissions', 'creditAmount', 'creditHistory', 'purchaseHistory'));
     }
 
     public function edit(Request $request, User $user = null) {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
+        }
    
         $user = $user??auth()->user();
-        if(auth()->id()!=$user?->id) {
-            if(!auth()->user()->hasPermissionTo('edit_users')) abort(401);
+        
+        // For employees - they can only edit themselves or customer accounts
+        if(auth()->user()->isEmployee() && !auth()->user()->isAdmin()) {
+            // If trying to edit another user
+            if(auth()->id() != $user->id) {
+                // Check if that user is a customer, otherwise redirect
+                if(!$user->hasRole('customer')) {
+                    return redirect()->route('users')
+                        ->with('error', 'You can only edit customer accounts');
+                }
+            }
+        }
+        
+        // For regular users, check edit_users permission
+        if(auth()->id() != $user->id) {
+            if(!auth()->user()->hasPermissionTo('edit_users')) {
+                return redirect()->route('profile');
+            }
         }
     
         $roles = [];
@@ -145,48 +181,68 @@ class UsersController extends Controller {
     }
 
     public function save(Request $request, User $user) {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
+        }
 
         if(auth()->id()!=$user->id) {
-            if(!auth()->user()->hasPermissionTo('show_users')) abort(401);
+            if(!auth()->user()->hasPermissionTo('view_users')) {
+                return redirect()->route('profile');
+            }
         }
 
         $user->name = $request->name;
-        $user->save();
-
-        if(auth()->user()->hasPermissionTo('admin_users')) {
-
+        
+        if(auth()->check() && auth()->user()->hasPermissionTo('admin_users')) {
+            $user->is_admin = $request->has('is_admin') ? 1 : 0;
             $user->syncRoles($request->roles);
             $user->syncPermissions($request->permissions);
 
             Artisan::call('cache:clear');
         }
 
-        //$user->syncRoles([1]);
-        //Artisan::call('cache:clear');
+        $user->save();
 
         return redirect(route('profile', ['user'=>$user->id]));
     }
 
     public function delete(Request $request, User $user) {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
+        }
 
-        if(!auth()->user()->hasPermissionTo('delete_users')) abort(401);
+        if(!auth()->user()->hasPermissionTo('delete_users')) {
+            return redirect()->route('users');
+        }
 
-        //$user->delete();
+        $user->delete();
 
         return redirect()->route('users');
     }
 
     public function editPassword(Request $request, User $user = null) {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
+        }
 
         $user = $user??auth()->user();
         if(auth()->id()!=$user?->id) {
-            if(!auth()->user()->hasPermissionTo('edit_users')) abort(401);
+            if(!auth()->user()->hasPermissionTo('edit_users')) {
+                return redirect()->route('profile');
+            }
         }
 
         return view('users.edit_password', compact('user'));
     }
 
     public function savePassword(Request $request, User $user) {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
+        }
 
         if(auth()->id()==$user?->id) {
             
@@ -201,108 +257,403 @@ class UsersController extends Controller {
             }
         }
         else if(!auth()->user()->hasPermissionTo('edit_users')) {
-
-            abort(401);
+            return redirect()->route('profile');
         }
 
-        $user->password = bcrypt($request->password);
+        $user->password = bcrypt($request->password); //Secure
         $user->save();
 
         return redirect(route('profile', ['user'=>$user->id]));
     }
 
-    public function verify(Request $request) {
-   
-        $decryptedData = json_decode(Crypt::decryptString($request->token), true);
-        $user = User::find($decryptedData['id']);
-        if(!$user) abort(401);
-        $user->email_verified_at = Carbon::now();
-        $user->save();
-
-        return view('users.verified', compact('user'));
-    }
-
-    public function redirectToGoogle()
+    public function forgotPassword()
     {
-        \Log::info('Google redirect URL: ' . config('services.google.redirect'));
-        
-        return Socialite::driver('google')
-            ->stateless()
-            ->redirectUrl(config('services.google.redirect'))
-            ->redirect();
+        return view('users.forgot_password');
     }
 
-    public function handleGoogleCallback() {
-        try {
-            \Log::info('Entering Google callback method');
+    public function processForgotPassword(Request $request)
+    {
+        $this->validate($request, [
+            'email' => 'required|email|exists:users,email',
+        ], [
+            'email.exists' => 'This email is not registered in our system.',
+        ]);
+
+        $user = User::where('email', $request->email)->first();
+        
+        // Determine if we use the basic or professional reset method based on config
+        // Default to professional if not specified
+        $useBasicReset = config('app.use_basic_password_reset', false);
+        
+        if ($useBasicReset) {
+            // Basic password reset (send temporary password)
+            $tempPassword = Str::random(10);
             
-            $googleUser = Socialite::driver('google')
-                ->stateless()
-                ->user();
-            
-            \Log::info('Google login successful: ' . $googleUser->email);
-            
-            $user = User::updateOrCreate([
-                'google_id' => $googleUser->id,
-            ], [
-                'name' => $googleUser->name,
-                'email' => $googleUser->email,
-                'google_token' => $googleUser->token,
-                'google_refresh_token' => $googleUser->refreshToken,
+            // Store the reset record
+            PasswordReset::create([
+                'email' => $user->email,
+                'token' => bcrypt($tempPassword),
+                'is_temp_password' => true,
+                'created_at' => now(),
+                'expires_at' => now()->addDays(1),
             ]);
             
-            Auth::login($user);
-            return redirect('/');
-        } catch (\Exception $e) {
-            \Log::error('Google login failed: ' . $e->getMessage());
-            \Log::error('Google login failure trace: ' . $e->getTraceAsString());
-            return redirect('/login')->with('error', 'Google login failed: ' . $e->getMessage());
+            // Update user to flag they're using temp password
+            $user->password = bcrypt($tempPassword);
+            $user->is_using_temp_password = true;
+            $user->save();
+            
+            // Send email with temp password
+            try {
+                Mail::send('emails.reset_password_temp', ['user' => $user, 'tempPassword' => $tempPassword], function ($message) use ($user) {
+                    $message->to($user->email);
+                    $message->subject('Your Temporary Password');
+                });
+                \Log::info('Temporary password email sent to: ' . $user->email);
+            } catch (\Exception $e) {
+                \Log::error('Failed to send temporary password email: ' . $e->getMessage());
+                return redirect()->back()->with('error', 'Failed to send email. Please try again later.');
+            }
+            
+            return redirect()->route('login')->with('success', 'A temporary password has been sent to your email.');
+        } else {
+            // Professional password reset (send secure link)
+            $token = Str::random(60);
+            
+            // Delete any existing reset tokens for this email
+            PasswordReset::where('email', $user->email)->delete();
+            
+            // Store the reset record
+            PasswordReset::create([
+                'email' => $user->email,
+                'token' => $token,
+                'is_temp_password' => false,
+                'created_at' => now(),
+                'expires_at' => now()->addHour(),
+            ]);
+            
+            // Generate reset link
+            $resetLink = route('reset_password_token', ['token' => $token]) . '?email=' . urlencode($user->email);
+            
+            // Send email with reset link
+            try {
+                Mail::send('emails.reset_password_link', ['user' => $user, 'resetLink' => $resetLink], function ($message) use ($user) {
+                    $message->to($user->email);
+                    $message->subject('Reset Your Password');
+                });
+                \Log::info('Password reset link email sent to: ' . $user->email);
+            } catch (\Exception $e) {
+                \Log::error('Failed to send password reset link email: ' . $e->getMessage());
+                return redirect()->back()->with('error', 'Failed to send email. Please try again later.');
+            }
+            
+            return redirect()->route('login')->with('success', 'A password reset link has been sent to your email.');
         }
     }
 
-    public function resendVerification(Request $request) {
-        $email = urldecode($request->query('email'));
+    // Original security question based reset (keeping for backward compatibility)
+    public function resetPassword(User $user)
+    {
+        return view('users.security_question', compact('user'));
+    }
+
+    public function processResetPassword(Request $request, User $user)
+    {
+        $this->validate($request, [
+            'security_answer' => 'required',
+            'password' => ['required', 'confirmed', Password::min(8)->numbers()->letters()->mixedCase()->symbols()],
+        ]);
+
+        // Check if the security answer is correct
+        if ($request->security_answer !== $user->security_answer) {
+            return redirect()->back()->withErrors(['security_answer' => 'The answer to the security question is incorrect.']);
+        }
+
+        // Update the password
+        $user->password = bcrypt($request->password);
+        $user->save();
+
+        return redirect()->route('login')->with('success', 'Your password has been reset successfully. You can now log in with your new password.');
+    }
+    
+    // Professional password reset methods (with token)
+    public function resetPasswordWithToken(Request $request, $token)
+    {
+        $email = $request->query('email');
         
-        if (!$email) {
-            return redirect()->route('login')
-                ->withErrors('Email parameter is missing. Please try logging in again.');
+        // Check if token is valid
+        $reset = PasswordReset::where('token', $token)
+            ->where('email', $email)
+            ->where('is_temp_password', false)
+            ->where('expires_at', '>', now())
+            ->first();
+            
+        if (!$reset) {
+            return redirect()->route('login')->with('error', 'Invalid or expired password reset link.');
         }
         
-        \Log::info('Attempting to find user with email: ' . $email);
+        return view('users.reset_password', ['token' => $token, 'email' => $email]);
+    }
+    
+    public function processResetPasswordWithToken(Request $request, $token)
+    {
+        $email = $request->input('email');
         
+        $this->validate($request, [
+            'password' => ['required', 'confirmed', Password::min(8)->numbers()->letters()->mixedCase()->symbols()],
+            'email' => 'required|email|exists:users,email',
+        ]);
+        
+        // Check if token is valid
+        $reset = PasswordReset::where('token', $token)
+            ->where('email', $email)
+            ->where('is_temp_password', false)
+            ->where('expires_at', '>', now())
+            ->first();
+            
+        if (!$reset) {
+            return redirect()->route('login')->with('error', 'Invalid or expired password reset link.');
+        }
+        
+        // Find the user and update password
         $user = User::where('email', $email)->first();
+        $user->password = bcrypt($request->password);
+        $user->save();
         
-        if (!$user) {
-            \Log::info('No user found with email: ' . $email);
-            return redirect()->route('login')
-                ->withErrors('User not found with email: ' . $email)
-                ->withInput(['email' => $email]); 
+        // Delete the token after successful reset
+        $reset->delete();
+        
+        return redirect()->route('login')->with('success', 'Your password has been reset successfully. You can now log in with your new password.');
+    }
+    
+    // Basic password reset methods (temp password)
+    public function changeTempPassword()
+    {
+        // Only allow access if user is using a temp password
+        if (!Auth::check() || !Auth::user()->is_using_temp_password) {
+            return redirect()->route('home');
         }
         
-        $token = Crypt::encryptString(json_encode(['id' => $user->id, 'email' => $user->email]));
-        $link = route("verify", ['token' => $token]);
+        return view('users.change_temp_password');
+    }
+    
+    public function updateTempPassword(Request $request)
+    {
+        // Only allow access if user is using a temp password
+        if (!Auth::check() || !Auth::user()->is_using_temp_password) {
+            return redirect()->route('home');
+        }
+        
+        $this->validate($request, [
+            'password' => ['required', 'confirmed', Password::min(8)->numbers()->letters()->mixedCase()->symbols()],
+        ]);
+        
+        $user = Auth::user();
+        $user->password = bcrypt($request->password);
+        $user->is_using_temp_password = false;
+        $user->save();
+        
+        return redirect()->route('home')->with('success', 'Your password has been updated successfully.');
+    }
+
+    /**
+     * Show form to create a new employee account (admin only)
+     */
+    public function createEmployee()
+    {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
+        }
+        
+        // Check if user is admin
+        if(!auth()->user()->isAdmin()) {
+            return redirect()->route('users')
+                ->with('error', 'Only administrators can create employee accounts');
+        }
+        
+        return view('users.create_employee');
+    }
+
+    /**
+     * Process the creation of a new employee account (admin only)
+     */
+    public function storeEmployee(Request $request)
+    {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
+        }
+        
+        // Check if user is admin
+        if(!auth()->user()->isAdmin()) {
+            return redirect()->route('users')
+                ->with('error', 'Only administrators can create employee accounts');
+        }
+        
+        $this->validate($request, [
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['required', 'string', 'email', 'max:255', 'unique:users'],
+            'password' => ['required', 'string', 'min:8', 'confirmed'],
+        ]);
         
         try {
-            \Log::info('Attempting to send verification email to: ' . $user->email);
-            Mail::to($user->email)->send(new VerificationEmail($link, $user->name));
-            \Log::info('Successfully sent verification email');
+            DB::beginTransaction();
+            
+            // Create new user
+            $user = User::create([
+                'name' => $request->name,
+                'email' => $request->email,
+                'password' => Hash::make($request->password),
+                'is_admin' => $request->has('is_admin') ? 1 : 0,
+            ]);
+            
+            // Assign Employee role
+            $employeeRole = \Spatie\Permission\Models\Role::firstOrCreate(['name' => 'employee', 'guard_name' => 'web']);
+            $user->assignRole($employeeRole);
+            
+            // If is_admin is checked, also assign Admin role
+            if($request->has('is_admin')) {
+                $adminRole = \Spatie\Permission\Models\Role::firstOrCreate(['name' => 'admin', 'guard_name' => 'web']);
+                $user->assignRole($adminRole);
+            }
+            
+            // Clear permissions cache
+            Artisan::call('cache:clear');
+            
+            DB::commit();
+            
+            return redirect()->route('users')
+                ->with('success', 'Employee account created successfully');
         } catch (\Exception $e) {
-            \Log::error('Failed to send verification email: ' . $e->getMessage());
-            return redirect('/')->with('message', 'Registration complete. If you did not receive an email, please check your spam folder or contact support.');
+            DB::rollBack();
+            return redirect()->back()->withInput($request->all())
+                ->with('error', 'Failed to create employee account: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Displays customers for employees to manage
+     */
+    public function employeeCustomers(Request $request)
+    {
+        // Check if user is logged in
+        if(!auth()->check()) {
+            return redirect()->route('login');
         }
         
+        // Check if user is an employee or admin
+        $user = Auth::user();
+        if (!$user->isEmployee() && !$user->isAdmin() && !$user->hasPermissionTo('manage_customers')) {
+            return redirect()->route('login')
+                ->with('error', 'You do not have permission to view this page');
+        }
+        
+        // Get all users (instead of just customers)
+        $query = User::query();
+        
+        // Apply keyword search if provided
+        if ($request->keywords) {
+            $query->where("name", "like", "%$request->keywords%");
+        }
+        
+        $customers = $query->get();
+        
+        return view('employee_customers.index', compact('customers'));
+    }
+
+    /**
+     * Ensure users have proper roles
+     */
+    public function ensureUserRoles()
+    {
+        // Get all users without roles
+        $usersWithoutRoles = User::whereDoesntHave('roles')->get();
+        
+        // Get roles
+        $adminRole = Role::where('name', 'admin')->first();
+        $employeeRole = Role::where('name', 'employee')->first();
+        $customerRole = Role::where('name', 'customer')->first();
+        
+        foreach ($usersWithoutRoles as $user) {
+            // If user is marked as admin, assign admin role
+            if ($user->is_admin) {
+                $user->assignRole($adminRole);
+            } else {
+                // Default to customer role
+                $user->assignRole($customerRole);
+            }
+        }
+        
+        return redirect()->back()->with('success', 'User roles have been updated.');
+    }
+
+    /**
+     * Toggle the block status of a user (block or unblock)
+     *
+     * @param User $user
+     * @return \Illuminate\Http\RedirectResponse
+     */
+    public function toggleBlockStatus(User $user)
+    {
+        // Only employees and admins can block/unblock users
+        if (!Auth::user()->isAdmin() && !Auth::user()->isEmployee()) {
+            abort(403, 'You do not have permission to perform this action');
+        }
+
+        // Can't block yourself
+        if (Auth::id() === $user->id) {
+            return redirect()->back()->with('error', 'You cannot block yourself');
+        }
+
+        // Toggle the block status
+        if ($user->is_blocked) {
+            // Unblock the user
+            $user->is_blocked = false;
+            $user->save();
+            return redirect()->back()->with('success', 'User has been unblocked successfully');
+        } else {
+            // Block the user
+            $user->is_blocked = true;
+            $user->save();
+            return redirect()->back()->with('success', 'User has been blocked successfully');
+        }
+    }
+
+    public function verifyEmail(Request $request, $id, $hash)
+    {
+        $user = User::find($id);
+
+        if (!$user) {
+            return redirect()->route('login')
+                ->with('error', 'Invalid verification link.');
+        }
+
+        if ($user->hasVerifiedEmail()) {
+            return redirect()->route('login')
+                ->with('info', 'Email already verified.');
+        }
+
+        if (!hash_equals((string) $hash, sha1($user->getEmailForVerification()))) {
+            return redirect()->route('login')
+                ->with('error', 'Invalid verification link.');
+        }
+
+        $user->markEmailAsVerified();
+
         return redirect()->route('login')
-            ->with('success', 'Verification email has been resent to ' . $email . '. Please check your inbox.')
-            ->withInput(['email' => $email]);
+            ->with('success', 'Email verified successfully! You can now login.');
     }
 
-    public function someMethod(Request $request) {
-        \Log::info('Starting method execution');
+    public function resendVerification(Request $request)
+    {
+        $user = auth()->user();
         
-
+        if ($user && !$user->hasVerifiedEmail()) {
+            $user->sendEmailVerificationNotification();
+            return redirect()->back()->with('success', 'Verification email has been resent.');
+        }
         
-        \Log::info('Method completed');
-        return view('your.view');
+        return redirect()->back()->with('error', 'Your email is already verified.');
     }
-
 } 

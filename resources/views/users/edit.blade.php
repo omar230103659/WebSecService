@@ -48,6 +48,12 @@ $(document).ready(function(){
                     @endforeach
                 </select>
             </div>
+            <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" value="1" id="is_admin" name="is_admin" {{ $user->is_admin ? 'checked' : '' }}>
+                <label class="form-check-label" for="is_admin">
+                    Administrator
+                </label>
+            </div>
             @endcan
 
             <button type="submit" class="btn btn-primary">Submit</button>
